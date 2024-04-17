@@ -22,13 +22,15 @@ from utils.load_scalars_from_setup import load_scalars_from_setup
 # from model.sred_rho_DO import SRED_rho
 # print('SRED_rho with Drop Out (DO)')
 
-from model.sred import SRED_rep_rho
+from model.srel_intra_phase1 import SREL_intra_phase1_rep_rho
 from model.srel_intra_tester import SREL_intra_phase1_tester
 # print('SRED_rho with Batch Normalization (BN)')
 
 
-from utils.custom_loss_sred_rho import custom_loss_sred_mono
-from utils.worst_sinr import worst_sinr_function
+from utils.custom_loss_intra import custom_loss_intra_phase1_mono
+# from utils.worst_sinr import worst_sinr_function
+
+# from utils.worst_sinr import worst_sinr_function
 
 from torch.utils.tensorboard import SummaryWriter #tensorboard
 # tensorboard --logdir=runs/SREL --reload_interval 5
@@ -52,7 +54,7 @@ def main(save_weights, save_logs, save_mat,
     # Load dataset
     constants = load_scalars_from_setup('data/data_setup.mat')
     # y_M, Ly = load_mapVector('data/data_mapV.mat')
-    data_num = 1e1
+    data_num = 1e2
     
     
     # loading constant
@@ -73,9 +75,9 @@ def main(save_weights, save_logs, save_mat,
     # Initialize model
     N_step = 10
     constants['N_step'] = N_step
-    model_intra_phase1 = SRED_rep_rho(constants)
+    model_intra_phase1 = SREL_intra_phase1_rep_rho(constants)
 #    model_intra_phase1.apply(init_weights)
-    num_epochs = 2
+    num_epochs = 50
     # Initialize the optimizer
     # learning_rate=1e-5
     # print(f'learning_rate={learning_rate:.0e}')
@@ -102,15 +104,14 @@ def main(save_weights, save_logs, save_mat,
     print(f'current time: {start_time_tag}')
     
     # Create a unique directory name using the current time and the N_step value
-    if save_logs:
-        log_dir = (
-            f'runs/sred_rep_rho_mono/data{data_num:.0e}/'
-            f'lambda_sinr{lambda_sinr:.0e}/'
-            f'{start_time_tag}'
-            f'_lambda_mono{lambda_mono:.0e}'
-            f'_lr_{learning_rate:.0e}'
-        )
-        writer = SummaryWriter(log_dir)
+    log_dir = (
+        f'runs/intra_phase1_mono/rep_rho/data{data_num:.0e}/'
+        f'lambda_sinr{lambda_sinr:.0e}/'
+        f'{start_time_tag}'
+        f'_lambda_mono{lambda_mono:.0e}'
+        f'_lr_{learning_rate:.0e}'
+    )
+    writer = SummaryWriter(log_dir)
     
     
     # List to store average loss per epoch
@@ -133,7 +134,6 @@ def main(save_weights, save_logs, save_mat,
         for idx_case in range(num_case):
             case_num = idx_case + 1
             dataset = TrainingDataSet(f'data/{data_num:.0e}/data_trd_{data_num:.0e}_case{case_num:02d}.mat')
-            y_M = dataset.y_M.to(device)  # If y_M is a tensor that requires to be on the GPU
 
             # Split dataset into training and validation
             train_indices, val_indices = train_test_split(
@@ -155,25 +155,26 @@ def main(save_weights, save_logs, save_mat,
                 G_M_batch = G_M_batch.to(device)
                 H_M_batch = H_M_batch.to(device)
                 w_M_batch = w_M_batch.to(device)
-                
-                # batch_size_current = phi_batch.size(0)
-                # y_batch_M = y_M.unsqueeze(1).expand(-1, batch_size_current, -1).transpose(0, 2)
+                y_M = dataset.y_M.to(device)  # If y_M is a tensor that requires to be on the GPU
 
+                for m, (G_batch, H_batch) in enumerate(zip(torch.unbind(G_M_batch, dim=3),
+                                                           torch.unbind(H_M_batch, dim=3))):
+                    w_batch = w_M_batch[:,:,m]
+                    y = y_M[:,m]
 
-                # Perform training steps
-                optimizer.zero_grad()
+                    # Perform training steps
+                    optimizer.zero_grad()
+    
+                    model_outputs = model_intra_phase1(phi_batch, w_batch, y, G_batch, H_batch)
 
-                model_outputs = model_intra_phase1(
-                    phi_batch, w_M_batch, y_M, G_M_batch, H_M_batch)
+                    # s_stack_batch = model_outputs['s_stack_batch']
+                    loss, _ , _ = custom_loss_intra_phase1_mono(
+                        constants, G_batch, H_batch, hyperparameters, model_outputs)
+    
+                    loss.backward()
+                    optimizer.step()
 
-                # s_stack_batch = model_outputs['s_stack_batch']
-                loss, _ = custom_loss_sred_mono(
-                    constants, G_M_batch, H_M_batch, hyperparameters, model_outputs)
-
-                loss.backward()
-                optimizer.step()
-
-                total_train_loss += loss.item()
+                    total_train_loss += loss.item()
 
 
 
@@ -194,25 +195,40 @@ def main(save_weights, save_logs, save_mat,
                     w_M_batch = w_M_batch.to(device)
                     y_M = y_M.to(device)  # If y_M is a tensor that requires to be on the GPU
                     
-                    # batch_size_current = phi_batch.size(0)
-                    # y_batch_M = y_M.unsqueeze(1).expand(-1, batch_size_current, -1).transpose(0, 2)
+                    sinr_opt_M = np.zeros(M)
                     
-                    model_outputs = model_intra_phase1(
-                        phi_batch, w_M_batch, y_M, G_M_batch, H_M_batch)
-
-                    val_loss, N_vl = custom_loss_sred_mono(
-                        constants, G_M_batch, H_M_batch, hyperparameters, model_outputs)
-                    
-                    total_val_loss += val_loss.item()
-                    N_vl_sum += N_vl
+                    for m, (G_batch, H_batch) in enumerate(zip(torch.unbind(G_M_batch, dim=3),
+                                                               torch.unbind(H_M_batch, dim=3))):
+                        w_batch = w_M_batch[:,:,m]
+                        y = y_M[:,m]
                         
-                    s_stack_batch = model_outputs['s_stack_batch']
-                    s_optimal_batch = s_stack_batch[:,-1,:].squeeze()
+                        model_outputs = model_intra_phase1(phi_batch, w_batch, y, G_batch, H_batch)
 
-                    sum_of_worst_sinr_avg+= np.sum(
-                        worst_sinr_function(constants, s_optimal_batch, G_M_batch, H_M_batch)
-                        )/batch_size
+                        val_loss, sinr_opt_avg, N_vl = custom_loss_intra_phase1_mono(
+                            constants, G_batch, H_batch, hyperparameters, model_outputs)
+                        
+                        total_val_loss += val_loss.item()
+                        N_vl_sum += N_vl
+                        # model_intra_tester
+                        
+                        # s_stack_batch = model_outputs['s_stack_batch']
+                        # s_optimal_batch = s_stack_batch[:,-1,:].squeeze()
+                        
+                        sinr_opt_M[m] = sinr_opt_avg.item()
+                        
+                    sum_of_worst_sinr_avg += np.min(sinr_opt_M)
     
+                    # model_outputs = model_intra_tester(
+                    #     phi_batch, w_M_batch, y_M, G_M_batch, H_M_batch
+                    #     )
+                    
+                    # s_stack_batch = model_outputs['s_stack_batch']
+                    # s_optimal_batch = s_stack_batch[:,-1,:]
+                    # sum_of_worst_sinr_avg += np.sum(
+                    #     worst_sinr_function(
+                    #         constants, s_optimal_batch, G_M_batch, H_M_batch)
+                    #     )/batch_size
+                    
                     
                     
         # Compute average loss for the epoch and Log the loss
@@ -235,10 +251,10 @@ def main(save_weights, save_logs, save_mat,
         worst_sinr_avg_db = 10*np.log10(sum_of_worst_sinr_avg/ len(test_loader) / num_case)  # Compute average loss for the epoch
         epoch_counter = np.round(num_epochs/10)
         if epoch == 0 or (epoch+1) % epoch_counter == 0:
-            print(f'Epoch [{epoch+1}/{num_epochs}]\n '
+            print(f'Epoch [{epoch+1}/{num_epochs}], '
                  f'Train Loss = {average_train_loss_db:.2f} dB, '
                  f'Testing Loss = {average_val_loss_db:.2f} dB, \n'
-                 f'average_worst_sinr = {worst_sinr_avg_db:.2f} dB, '
+                 f'average_worst_sinr = {worst_sinr_avg_db:.4f} dB'
                  f'# of violation = {N_vl_avg:.2f}')
             
             time_spent_epoch = time.time() - start_time_epoch  # Time spent in the current inner loop iteration
@@ -261,7 +277,7 @@ def main(save_weights, save_logs, save_mat,
     if save_logs:
         formatted_string = (f'Train Loss = {average_train_loss_db:.2f} dB, '
                             f'Testing Loss = {average_val_loss_db:.2f} dB, \n'
-                            f'average_worst_sinr = {worst_sinr_avg_db:.2f} dB, '
+                            f'average_worst_sinr = {worst_sinr_avg_db:.4f} dB'
                             f'# of violation = {N_vl_avg:.2f}')
         
         file_name = os.path.join(log_dir,'training_log.txt')
@@ -279,7 +295,7 @@ def main(save_weights, save_logs, save_mat,
     if save_mat:
         matfilename = "data_SRED_rho_10step_result.mat"
         dir_mat_save = (
-            f'mat/sred_rep_rho_mono/{start_time_tag}'
+            f'mat/intra_phase1_mono/rep_rho/{start_time_tag}'
             f'_Nstep{N_step:02d}_batch{batch_size:02d}'
             f'_sinr_{worst_sinr_avg_db:.2f}dB'
         )
@@ -297,7 +313,7 @@ def main(save_weights, save_logs, save_mat,
         }
         # save
         dir_weight_save = (
-            f'weights/sred_rep_rho_mono/{start_time_tag}'
+            f'weights/intra_phase1_mono/rep_rho/{start_time_tag}'
             f'_Nstep{N_step:02d}_batch{batch_size:02d}'
             f'_sinr_{worst_sinr_avg_db:.2f}dB'
         )
@@ -320,5 +336,16 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     
+    # main(save_weights=args.save_weights, save_logs=args.save_logs,save_mat=args.save_mat, 
+    #     batch_size=5, learning_rate=1e-5, lambda_sinr = 1e-1, lambda_mono=1e0)
+    
     main(save_weights=args.save_weights, save_logs=args.save_logs,save_mat=args.save_mat, 
         batch_size=5, learning_rate=1e-5, lambda_sinr = 1e-1, lambda_mono=1e-1)
+    
+    main(save_weights=args.save_weights, save_logs=args.save_logs,save_mat=args.save_mat, 
+        batch_size=5, learning_rate=1e-5, lambda_sinr = 1e-1, lambda_mono=1e-3)
+    
+    main(save_weights=args.save_weights, save_logs=args.save_logs,save_mat=args.save_mat, 
+        batch_size=5, learning_rate=1e-5, lambda_sinr = 1e-1, lambda_mono=1e-5)
+    
+
