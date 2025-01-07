@@ -31,9 +31,8 @@ from model.srel_inter import SREL_rep_mu
 
 
 from utils.custom_loss_inter import custom_loss_function
-# from utils.worst_sinr import worst_sinr_function
+from utils.worst_sinr import worst_sinr_function
 
-# from utils.worst_sinr import worst_sinr_function
 
 from torch.utils.tensorboard import SummaryWriter #tensorboard
 # tensorboard --logdir=runs/SREL --reload_interval 5
@@ -96,6 +95,8 @@ def main(save_weights, save_logs, save_mat, lambda_eta,weightdir):
     constants['N_step'] = N_step
     model_intra_phase1 = SREL_intra_phase1_vary_rho(constants)
     model_intra_phase2 = SREL_vary_eta(constants, model_intra_phase1)
+    model_intra_phase2.to(device)
+    # model_intra_phase2.device = device
     model_intra_phase2.load_state_dict(loaded_dict['state_dict'])   
     
     # freeze model_intra
@@ -104,6 +105,7 @@ def main(save_weights, save_logs, save_mat, lambda_eta,weightdir):
         
     # Initialize model
     model_inter = SREL_rep_mu(constants, model_intra_phase2)
+    model_inter.to(device)
     model_inter.device = device
     
     num_epochs = 5
@@ -123,8 +125,7 @@ def main(save_weights, save_logs, save_mat, lambda_eta,weightdir):
         'lambda_eta': lambda_eta
     }    
     ###############################################################
-    model_intra_phase2.to(device)
-    model_intra_phase2.device = device
+    
     
     # for results
     # Get the current time
@@ -153,7 +154,7 @@ def main(save_weights, save_logs, save_mat, lambda_eta,weightdir):
         total_train_loss = 0.0
         total_val_loss = 0.0
         
-        sum_of_worst_sinr_avg = 0.0  # Accumulate loss over all batches
+        sum_of_worst_sinr = 0.0  # Accumulate loss over all batches
         
         start_time_epoch = time.time()  # Start timing the inner loop
         for idx_case in range(num_case):
@@ -182,24 +183,24 @@ def main(save_weights, save_logs, save_mat, lambda_eta,weightdir):
                 w_M_batch = w_M_batch.to(device)
                 y_M = dataset.y_M.to(device)  # If y_M is a tensor that requires to be on the GPU
 
-                for m, (G_batch, H_batch) in enumerate(zip(torch.unbind(G_M_batch, dim=3),
-                                                           torch.unbind(H_M_batch, dim=3))):
-                    w_batch = w_M_batch[:,:,m]
-                    y = y_M[:,m]
+                # for m, (G_batch, H_batch) in enumerate(zip(torch.unbind(G_M_batch, dim=3),
+                #                                            torch.unbind(H_M_batch, dim=3))):
+                #     w_batch = w_M_batch[:,:,m]
+                #     y = y_M[:,m]
 
-                    # Perform training steps
-                    optimizer.zero_grad()
-    
-                    model_outputs = model_inter(phi_batch, w_batch, y)
+                # Perform training steps
+                optimizer.zero_grad()
 
-                    s_stack_batch = model_outputs['s_stack_batch']
-                    loss, _ = custom_loss_function(
-                        constants, G_M_batch, H_M_batch, hyperparameters, s_stack_batch)
-    
-                    loss.backward()
-                    optimizer.step()
+                model_outputs = model_inter(phi_batch, w_M_batch, y_M)
 
-                    total_train_loss += loss.item()
+                s_stack_batch = model_outputs['s_stack_batch']
+                loss = custom_loss_function(
+                    constants, G_M_batch, H_M_batch, hyperparameters, s_stack_batch)
+
+                loss.backward()
+                optimizer.step()
+
+                total_train_loss += loss.item()
 
             # Validation phase
             model_intra_phase2.eval()  # Set model to evaluation mode
@@ -207,7 +208,7 @@ def main(save_weights, save_logs, save_mat, lambda_eta,weightdir):
             model_intra_tester.device = device
 
             
-            # sum_of_worst_sinr_avg = 0.0
+            # sum_of_worst_sinr_in_a_case = 0.0
             
             with torch.no_grad():  # Disable gradient computation
                 for phi_batch, w_M_batch, G_M_batch, H_M_batch in test_loader:
@@ -220,21 +221,26 @@ def main(save_weights, save_logs, save_mat, lambda_eta,weightdir):
                     
                     sinr_opt_M = np.zeros(M)
                     
-                    for m, (G_batch, H_batch) in enumerate(zip(torch.unbind(G_M_batch, dim=3),
-                                                               torch.unbind(H_M_batch, dim=3))):
-                        w_batch = w_M_batch[:,:,m]
-                        y = y_M[:,m]
+                    # for m, (G_batch, H_batch) in enumerate(zip(torch.unbind(G_M_batch, dim=3),
+                    #                                            torch.unbind(H_M_batch, dim=3))):
+                    #     w_batch = w_M_batch[:,:,m]
+                    #     y = y_M[:,m]
                         
-                        model_outputs = model_inter(phi_batch, w_batch, y)
+                    model_outputs = model_inter(phi_batch, w_M_batch, y_M)
+                    
+                    s_stack_batch = model_outputs['s_stack_batch']
 
-                        val_loss, sinr_opt_avg = custom_loss_function(
-                            constants, G_batch, H_batch, hyperparameters, model_outputs)
-                        
-                        total_val_loss += val_loss.item()
-                        
-                        sinr_opt_M[m] = sinr_opt_avg.item()
-                        
-                    sum_of_worst_sinr_avg += np.min(sinr_opt_M)
+                    val_loss = custom_loss_function(
+                        constants, G_M_batch, H_M_batch, hyperparameters, s_stack_batch)
+                    
+                    total_val_loss += val_loss.item()
+                    
+                    
+                    
+                    # # get the worst SINR values from the inferred waveforms
+                    # s_optimal_batch = s_stack_batch[:,-1,:]
+                    # worst_sinr_batch = worst_sinr_function(constants, s_optimal_batch, G_M_batch, H_M_batch)
+                    # sum_of_worst_sinr += np.sum(worst_sinr_batch)
     
                     # model_outputs = model_intra_tester(
                     #     phi_batch, w_M_batch, y_M, G_M_batch, H_M_batch
@@ -264,10 +270,9 @@ def main(save_weights, save_logs, save_mat, lambda_eta,weightdir):
             writer.flush()
     
         # Log the loss        
-        worst_sinr_avg_db = 10*np.log10(sum_of_worst_sinr_avg/ len(test_loader) / num_case)  # Compute average loss for the epoch
+        # worst_sinr_avg_db = 10*np.log10(sum_of_worst_sinr_avg/ len(test_loader) / num_case)  # Compute average loss for the epoch
         print(f'Epoch [{epoch+1}/{num_epochs}], '
-             f'Train Loss = {average_train_loss_db:.2f} dB, '
-             f'average_worst_sinr = {worst_sinr_avg_db:.4f} dB')
+             f'Train Loss = {average_train_loss_db:.2f} dB')
         
         time_spent_epoch = time.time() - start_time_epoch  # Time spent in the current inner loop iteration
         time_left = time_spent_epoch * (num_epochs - epoch - 1)  # Estimate the time left
@@ -293,6 +298,7 @@ def main(save_weights, save_logs, save_mat, lambda_eta,weightdir):
     
     # validation
     worst_sinr_stack_list, f_stack_list = validation(constants,model_intra_tester)
+    worst_sinr_avg_db = 10*np.log10(np.sum(worst_sinr_stack_list[:,-1])/100)
     # sinr_db_opt = 10*np.log10(
     #     np.mean(worst_sinr_stack_list[:,-1])
     #     )
@@ -345,17 +351,17 @@ if __name__ == "__main__":
     main(save_weights=args.save_weights, save_logs=args.save_logs,save_mat=args.save_mat, 
          weightdir=args.weightdir, lambda_eta=1e-9)
 
-    main(save_weights=args.save_weights, save_logs=args.save_logs,save_mat=args.save_mat, 
-         weightdir=args.weightdir, lambda_eta=1e-7)
+    # main(save_weights=args.save_weights, save_logs=args.save_logs,save_mat=args.save_mat, 
+    #      weightdir=args.weightdir, lambda_eta=1e-7)
     
-    main(save_weights=args.save_weights, save_logs=args.save_logs,save_mat=args.save_mat, 
-         weightdir=args.weightdir, lambda_eta=1e-5)
+    # main(save_weights=args.save_weights, save_logs=args.save_logs,save_mat=args.save_mat, 
+    #      weightdir=args.weightdir, lambda_eta=1e-5)
     
-    main(save_weights=args.save_weights, save_logs=args.save_logs,save_mat=args.save_mat, 
-         weightdir=args.weightdir, lambda_eta=1e-3)
+    # main(save_weights=args.save_weights, save_logs=args.save_logs,save_mat=args.save_mat, 
+    #      weightdir=args.weightdir, lambda_eta=1e-3)
     
-    main(save_weights=args.save_weights, save_logs=args.save_logs,save_mat=args.save_mat, 
-         weightdir=args.weightdir, lambda_eta=1e-1)
+    # main(save_weights=args.save_weights, save_logs=args.save_logs,save_mat=args.save_mat, 
+    #      weightdir=args.weightdir, lambda_eta=1e-1)
     
 
 
